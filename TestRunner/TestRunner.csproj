@@ -1,0 +1,16 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\TestFramework\TestFramework.csproj" />
+    <ProjectReference Include="..\SampleLibrary.Tests\SampleLibrary.Tests.csproj" />
+    <ProjectReference Include="..\SampleLibrary\SampleLibrary.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>
