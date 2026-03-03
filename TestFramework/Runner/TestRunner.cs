@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Reflection;
 using TestFramework.Attributes;
 using TestFramework.Exceptions;
@@ -8,7 +10,8 @@ public enum TestResult
 {
     Passed,
     Failed,
-    Skipped
+    Skipped,
+    Timeout
 }
 
 public class TestResultInfo
@@ -18,38 +21,127 @@ public class TestResultInfo
     public TestResult Result { get; set; }
     public string? ErrorMessage { get; set; }
     public TimeSpan Duration { get; set; }
+    public int ThreadId { get; set; }
+}
+
+public class TestRunnerOptions
+{
+    public int MaxDegreeOfParallelism { get; set; } = Environment.ProcessorCount;
+    public bool RunInParallel { get; set; } = true;
+    public bool ParallelizeTestMethods { get; set; } = true;
 }
 
 public class TestRunner
 {
-    private readonly List<TestResultInfo> _results = new();
+    private readonly ConcurrentBag<TestResultInfo> _results = new();
     private readonly TextWriter _output;
+    private readonly object _outputLock = new();
+    private readonly object _consoleLock = new();
+    private readonly TestRunnerOptions _options;
 
-    public TestRunner(TextWriter? output = null)
+    public TestRunner(TextWriter? output = null, TestRunnerOptions? options = null)
     {
         _output = output ?? Console.Out;
+        _options = options ?? new TestRunnerOptions();
     }
+
+    private void WriteColored(string message, ConsoleColor color)
+    {
+        lock (_consoleLock)
+        {
+            var originalColor = Console.ForegroundColor;
+            Console.ForegroundColor = color;
+            lock (_outputLock)
+            {
+                _output.WriteLine(message);
+            }
+            Console.ForegroundColor = originalColor;
+        }
+    }
+
+    private void WriteSuccess(string message) => WriteColored(message, ConsoleColor.Green);
+    private void WriteFailure(string message) => WriteColored(message, ConsoleColor.Red);
+    private void WriteSkipped(string message) => WriteColored(message, ConsoleColor.Yellow);
+    private void WriteInfo(string message) => WriteColored(message, ConsoleColor.Cyan);
+    private void WriteTimeout(string message) => WriteColored(message, ConsoleColor.Magenta);
 
     public async Task<List<TestResultInfo>> RunTestsAsync(Assembly assembly)
     {
         _results.Clear();
-        var testClasses = DiscoverTestClasses(assembly);
+        var testClasses = DiscoverTestClasses(assembly).ToList();
 
-        _output.WriteLine("=== Запуск тестов ===\n");
+        var mode = _options.RunInParallel ? "ПАРАЛЛЕЛЬНЫЙ" : "ПОСЛЕДОВАТЕЛЬНЫЙ";
+        WriteInfo($"=== Запуск тестов ({mode}, MaxDegreeOfParallelism: {_options.MaxDegreeOfParallelism}) ===\n");
 
-        foreach (var testClass in testClasses)
+        var stopwatch = Stopwatch.StartNew();
+
+        if (_options.RunInParallel)
         {
-            await RunTestClassAsync(testClass);
+            var parallelOptions = new ParallelOptions
+            {
+                MaxDegreeOfParallelism = _options.MaxDegreeOfParallelism
+            };
+
+            await Parallel.ForEachAsync(testClasses, parallelOptions, async (testClass, ct) =>
+            {
+                await RunTestClassAsync(testClass);
+            });
+        }
+        else
+        {
+            foreach (var testClass in testClasses)
+            {
+                await RunTestClassAsync(testClass);
+            }
         }
 
-        PrintSummary();
-        return _results;
+        stopwatch.Stop();
+        PrintSummary(stopwatch.Elapsed);
+        return _results.ToList();
     }
 
     public async Task<List<TestResultInfo>> RunTestsFromFileAsync(string assemblyPath)
     {
         var assembly = Assembly.LoadFrom(assemblyPath);
         return await RunTestsAsync(assembly);
+    }
+
+    public async Task<(TimeSpan Sequential, TimeSpan Parallel)> ComparePerformanceAsync(Assembly assembly)
+    {
+        WriteInfo("=== СРАВНЕНИЕ ПРОИЗВОДИТЕЛЬНОСТИ ===\n");
+
+        var sequentialOptions = new TestRunnerOptions { RunInParallel = false };
+        var sequentialRunner = new TestRunner(_output, sequentialOptions);
+        
+        var sw1 = Stopwatch.StartNew();
+        await sequentialRunner.RunTestsAsync(assembly);
+        sw1.Stop();
+        var sequentialTime = sw1.Elapsed;
+
+        WriteInfo("\n" + new string('=', 50) + "\n");
+
+        var parallelOptions = new TestRunnerOptions 
+        { 
+            RunInParallel = true, 
+            MaxDegreeOfParallelism = _options.MaxDegreeOfParallelism,
+            ParallelizeTestMethods = _options.ParallelizeTestMethods
+        };
+        var parallelRunner = new TestRunner(_output, parallelOptions);
+        
+        var sw2 = Stopwatch.StartNew();
+        await parallelRunner.RunTestsAsync(assembly);
+        sw2.Stop();
+        var parallelTime = sw2.Elapsed;
+
+        WriteInfo("\n=== ИТОГИ СРАВНЕНИЯ ===");
+        WriteInfo($"Последовательное выполнение: {sequentialTime.TotalMilliseconds:F0} мс");
+        WriteInfo($"Параллельное выполнение:     {parallelTime.TotalMilliseconds:F0} мс");
+        
+        var speedup = sequentialTime.TotalMilliseconds / parallelTime.TotalMilliseconds;
+
+        WriteInfo($"Ускорение: {speedup:F2}x");
+
+        return (sequentialTime, parallelTime);
     }
 
     private IEnumerable<Type> DiscoverTestClasses(Assembly assembly)
@@ -64,17 +156,18 @@ public class TestRunner
         var ignoreAttr = testClass.GetCustomAttribute<IgnoreAttribute>();
         if (ignoreAttr != null)
         {
-            _output.WriteLine($"[ПРОПУЩЕН] Класс {testClass.Name}: {ignoreAttr.Reason ?? "без причины"}");
+            WriteSkipped($"[ПРОПУЩЕН] Класс {testClass.Name}: {ignoreAttr.Reason ?? "без причины"}");
             return;
         }
 
         var classAttr = testClass.GetCustomAttribute<TestClassAttribute>()!;
-        _output.WriteLine($"--- {testClass.Name} (приоритет: {classAttr.Priority}) ---");
+        WriteInfo($"--- {testClass.Name} (приоритет: {classAttr.Priority}, поток: {Environment.CurrentManagedThreadId}) ---");
 
-        var instance = Activator.CreateInstance(testClass);
         var beforeEach = GetMethodWithAttribute<BeforeEachAttribute>(testClass);
         var afterEach = GetMethodWithAttribute<AfterEachAttribute>(testClass);
-        var testMethods = GetTestMethods(testClass);
+        var testMethods = GetTestMethods(testClass).ToList();
+
+        var testExecutions = new List<(MethodInfo Method, object?[]? Parameters)>();
 
         foreach (var method in testMethods)
         {
@@ -84,22 +177,46 @@ public class TestRunner
             {
                 foreach (var testCase in testCases)
                 {
-                    await RunTestMethodAsync(instance!, method, beforeEach, afterEach, testCase.Parameters);
+                    testExecutions.Add((method, testCase.Parameters));
                 }
             }
             else
             {
-                await RunTestMethodAsync(instance!, method, beforeEach, afterEach, null);
+                testExecutions.Add((method, null));
             }
         }
 
-        _output.WriteLine();
+        if (_options.RunInParallel && _options.ParallelizeTestMethods)
+        {
+            var parallelOptions = new ParallelOptions
+            {
+                MaxDegreeOfParallelism = _options.MaxDegreeOfParallelism
+            };
+
+            await Parallel.ForEachAsync(testExecutions, parallelOptions, async (execution, ct) =>
+            {
+                var instance = Activator.CreateInstance(testClass);
+                await RunTestMethodAsync(instance!, execution.Method, beforeEach, afterEach, execution.Parameters);
+            });
+        }
+        else
+        {
+            var instance = Activator.CreateInstance(testClass);
+            foreach (var execution in testExecutions)
+            {
+                await RunTestMethodAsync(instance!, execution.Method, beforeEach, afterEach, execution.Parameters);
+            }
+        }
+
+        lock (_outputLock)
+        {
+            _output.WriteLine();
+        }
     }
 
     private async Task RunTestMethodAsync(object instance, MethodInfo method, 
         MethodInfo? beforeEach, MethodInfo? afterEach, object?[]? parameters)
     {
-        var methodAttr = method.GetCustomAttribute<TestMethodAttribute>()!;
         var displayName = parameters != null 
             ? $"{method.Name}({string.Join(", ", parameters)})" 
             : method.Name;
@@ -107,7 +224,8 @@ public class TestRunner
         var result = new TestResultInfo
         {
             ClassName = instance.GetType().Name,
-            MethodName = displayName
+            MethodName = displayName,
+            ThreadId = Environment.CurrentManagedThreadId
         };
 
         var ignoreAttr = method.GetCustomAttribute<IgnoreAttribute>();
@@ -115,13 +233,14 @@ public class TestRunner
         {
             result.Result = TestResult.Skipped;
             result.ErrorMessage = ignoreAttr.Reason ?? "Тест пропущен";
-            _output.WriteLine($"  [ПРОПУЩЕН] {displayName}: {result.ErrorMessage}");
+            WriteSkipped($"  [ПРОПУЩЕН] {displayName}: {result.ErrorMessage}");
             _results.Add(result);
             return;
         }
 
+        var timeoutAttr = method.GetCustomAttribute<TimeoutAttribute>();
         var expectedExceptionAttr = method.GetCustomAttribute<ExpectedExceptionAttribute>();
-        var startTime = DateTime.Now;
+        var startTime = Stopwatch.StartNew();
 
         try
         {
@@ -130,7 +249,14 @@ public class TestRunner
                 await InvokeMethodAsync(beforeEach, instance, null);
             }
 
-            await InvokeMethodAsync(method, instance, parameters);
+            if (timeoutAttr != null)
+            {
+                await InvokeWithTimeoutAsync(method, instance, parameters, timeoutAttr.Milliseconds);
+            }
+            else
+            {
+                await InvokeMethodAsync(method, instance, parameters);
+            }
 
             if (expectedExceptionAttr != null)
             {
@@ -139,7 +265,13 @@ public class TestRunner
             }
 
             result.Result = TestResult.Passed;
-            _output.WriteLine($"  [OK] {displayName}");
+            WriteSuccess($"  [OK] {displayName} (поток: {Environment.CurrentManagedThreadId})");
+        }
+        catch (TimeoutException)
+        {
+            result.Result = TestResult.Timeout;
+            result.ErrorMessage = $"Превышено время ожидания ({timeoutAttr!.Milliseconds} мс)";
+            WriteTimeout($"  [ТАЙМАУТ] {displayName}: {result.ErrorMessage}");
         }
         catch (Exception ex)
         {
@@ -149,19 +281,13 @@ public class TestRunner
                 expectedExceptionAttr.ExceptionType.IsInstanceOfType(actualException))
             {
                 result.Result = TestResult.Passed;
-                _output.WriteLine($"  [OK] {displayName} (исключение {actualException.GetType().Name})");
-            }
-            else if (actualException is TestSkippedException skipEx)
-            {
-                result.Result = TestResult.Skipped;
-                result.ErrorMessage = skipEx.Message;
-                _output.WriteLine($"  [ПРОПУЩЕН] {displayName}: {skipEx.Message}");
+                WriteSuccess($"  [OK] {displayName} (исключение {actualException.GetType().Name})");
             }
             else
             {
                 result.Result = TestResult.Failed;
                 result.ErrorMessage = actualException.Message;
-                _output.WriteLine($"  [ПРОВАЛЕН] {displayName}: {actualException.Message}");
+                WriteFailure($"  [ПРОВАЛЕН] {displayName}: {actualException.Message}");
             }
         }
         finally
@@ -175,10 +301,11 @@ public class TestRunner
             }
             catch (Exception ex)
             {
-                _output.WriteLine($"    Ошибка в AfterEach: {ex.Message}");
+                WriteFailure($"    Ошибка в AfterEach: {ex.Message}");
             }
 
-            result.Duration = DateTime.Now - startTime;
+            startTime.Stop();
+            result.Duration = startTime.Elapsed;
             _results.Add(result);
         }
     }
@@ -190,6 +317,31 @@ public class TestRunner
         {
             await task;
         }
+    }
+
+    private static async Task InvokeWithTimeoutAsync(MethodInfo method, object instance, object?[]? parameters, int timeoutMs)
+    {
+        using var cts = new CancellationTokenSource();
+        
+        var testTask = Task.Run(async () =>
+        {
+            var result = method.Invoke(instance, parameters);
+            if (result is Task task)
+            {
+                await task;
+            }
+        });
+
+        var timeoutTask = Task.Delay(timeoutMs, cts.Token);
+        var completedTask = await Task.WhenAny(testTask, timeoutTask);
+
+        if (completedTask == timeoutTask)
+        {
+            throw new TimeoutException($"Тест не завершился за {timeoutMs} мс");
+        }
+
+        cts.Cancel();
+        await testTask;
     }
 
     private static MethodInfo? GetMethodWithAttribute<T>(Type type) where T : Attribute
@@ -205,16 +357,22 @@ public class TestRunner
             .OrderBy(m => m.GetCustomAttribute<TestMethodAttribute>()!.Priority);
     }
 
-    private void PrintSummary()
+    private void PrintSummary(TimeSpan totalTime)
     {
         var passed = _results.Count(r => r.Result == TestResult.Passed);
         var failed = _results.Count(r => r.Result == TestResult.Failed);
         var skipped = _results.Count(r => r.Result == TestResult.Skipped);
+        var timeout = _results.Count(r => r.Result == TestResult.Timeout);
 
-        _output.WriteLine("=== Результаты ===");
-        _output.WriteLine($"Всего: {_results.Count}");
-        _output.WriteLine($"Успешно: {passed}");
-        _output.WriteLine($"Провалено: {failed}");
-        _output.WriteLine($"Пропущено: {skipped}");
+        WriteInfo("=== Результаты ===");
+        lock (_outputLock)
+        {
+            _output.WriteLine($"Всего: {_results.Count}");
+        }
+        WriteSuccess($"Успешно: {passed}");
+        WriteFailure($"Провалено: {failed}");
+        WriteTimeout($"Таймаут: {timeout}");
+        WriteSkipped($"Пропущено: {skipped}");
+        WriteInfo($"Общее время: {totalTime.TotalMilliseconds:F0} мс");
     }
 }

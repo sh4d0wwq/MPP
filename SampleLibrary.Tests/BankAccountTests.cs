@@ -48,16 +48,6 @@ public class BankAccountTests
     }
 
     [TestMethod]
-    [TestCase(100, 200, 300)]
-    [TestCase(50, 50, 100)]
-    [TestCase(0, 0, 0)]
-    public void Add_TwoNumbers_ReturnsSum(int a, int b, int expected)
-    {
-        var result = a + b;
-        Assert.AreEqual(expected, result);
-    }
-
-    [TestMethod]
     public void Withdraw_ValidAmount_DecreasesBalance()
     {
         _account.Withdraw(300);
@@ -216,14 +206,6 @@ public class ParameterizedTests
         Assert.AreEqual(balance, account.Balance);
     }
 
-    [TestMethod]
-    [TestCase(10, 5, 2)]
-    [TestCase(100, 25, 4)]
-    [TestCase(9, 3, 3)]
-    public void Divide_TwoNumbers_ReturnsQuotient(int a, int b, int expected)
-    {
-        Assert.AreEqual(expected, a / b);
-    }
 }
 
 [TestClass]
@@ -234,5 +216,84 @@ public class IgnoredTestClass
     public void Test_ShouldNotRun()
     {
         Assert.Fail("Этот тест не должен выполняться");
+    }
+}
+
+[TestClass(Priority = 3)]
+public class ParallelDemoTests
+{
+    [TestMethod]
+    [Timeout(500)]
+    public async Task SlowTest1_CompletesInTime()
+    {
+        await Task.Delay(200);
+        Assert.IsTrue(true);
+    }
+
+    [TestMethod]
+    [Timeout(500)]
+    public async Task SlowTest2_CompletesInTime()
+    {
+        await Task.Delay(200);
+        Assert.IsTrue(true);
+    }
+
+    [TestMethod]
+    [Timeout(500)]
+    public async Task SlowTest3_CompletesInTime()
+    {
+        await Task.Delay(200);
+        Assert.IsTrue(true);
+    }
+
+    [TestMethod]
+    [Timeout(500)]
+    public async Task SlowTest4_CompletesInTime()
+    {
+        await Task.Delay(200);
+        Assert.IsTrue(true);
+    }
+
+    [TestMethod]
+    [Timeout(100)]
+    public async Task TimeoutTest_ExceedsLimit()
+    {
+        await Task.Delay(500);
+        Assert.IsTrue(true);
+    }
+
+    [TestMethod]
+    public async Task LongRunningTest1()
+    {
+        await Task.Delay(300);
+        Assert.IsTrue(true);
+    }
+
+    [TestMethod]
+    public async Task LongRunningTest2()
+    {
+        await Task.Delay(300);
+        Assert.IsTrue(true);
+    }
+
+    [TestMethod]
+    public async Task LongRunningTest3()
+    {
+        await Task.Delay(300);
+        Assert.IsTrue(true);
+    }
+
+    [TestMethod]
+    public async Task LongRunningTest4()
+    {
+        await Task.Delay(300);
+        Assert.IsTrue(true);
+    }
+
+    [TestMethod]
+    public async Task LongRunningTest5()
+    {
+        await Task.Delay(300);
+        Assert.IsTrue(true);
     }
 }

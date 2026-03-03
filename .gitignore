@@ -101,3 +101,5 @@ Desktop.ini
 
 # JetBrains Rider
 *.sln.iml
+
+results.txt
