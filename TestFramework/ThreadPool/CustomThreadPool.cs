@@ -66,6 +66,15 @@ public class CustomThreadPool : IDisposable
     public event Action<PoolStatistics>? OnStatisticsUpdated;
     public event Action<string>? OnLog;
 
+    public event EventHandler<PoolCreatedEventArgs>? PoolCreated;
+    public event EventHandler<WorkerLifecycleEventArgs>? WorkerCreated;
+    public event EventHandler<WorkerLifecycleEventArgs>? WorkerDestroyed;
+    public event EventHandler<TaskEnqueuedEventArgs>? TaskEnqueued;
+    public event EventHandler<TaskLifecycleEventArgs>? TaskStarted;
+    public event EventHandler<TaskLifecycleEventArgs>? TaskCompleted;
+    public event EventHandler<PoolScalingEventArgs>? PoolScaledUp;
+    public event EventHandler<PoolDisposingEventArgs>? PoolDisposing;
+
     public CustomThreadPool(ThreadPoolOptions? options = null, Action<string>? logger = null)
     {
         _options = options ?? new ThreadPoolOptions();
@@ -83,6 +92,11 @@ public class CustomThreadPool : IDisposable
         _scalerThread.Start();
 
         Log($"Пул создан: MinThreads={_options.MinThreads}, MaxThreads={_options.MaxThreads}");
+        PoolCreated?.Invoke(this, new PoolCreatedEventArgs
+        {
+            MinThreads = _options.MinThreads,
+            MaxThreads = _options.MaxThreads
+        });
     }
 
     public void QueueTask(Action task, string name = "")
@@ -95,6 +109,11 @@ public class CustomThreadPool : IDisposable
         _taskAvailable.Release();
         
         Log($"Задача добавлена: {name}, в очереди: {_taskQueue.Count}");
+        TaskEnqueued?.Invoke(this, new TaskEnqueuedEventArgs
+        {
+            TaskName = name,
+            QueueLength = _taskQueue.Count
+        });
     }
 
     public Task QueueTaskAsync(Action task, string name = "")
@@ -167,6 +186,11 @@ public class CustomThreadPool : IDisposable
             _threadsCreated++;
             
             Log($"Поток создан: {worker.Name}, всего потоков: {_workers.Count}");
+            WorkerCreated?.Invoke(this, new WorkerLifecycleEventArgs
+            {
+                WorkerName = worker.Name,
+                ActiveWorkerCount = _workers.Count
+            });
         }
     }
 
@@ -181,6 +205,11 @@ public class CustomThreadPool : IDisposable
             {
                 _threadsDestroyed++;
                 Log($"Поток завершён: {worker.Name}, осталось потоков: {_workers.Count}");
+                WorkerDestroyed?.Invoke(this, new WorkerLifecycleEventArgs
+                {
+                    WorkerName = worker.Name,
+                    ActiveWorkerCount = _workers.Count
+                });
             }
         }
     }
@@ -194,6 +223,11 @@ public class CustomThreadPool : IDisposable
                 _hungThreadsReplaced++;
                 _threadsDestroyed++;
                 Log($"Зависший поток заменён: {worker.Name}");
+                WorkerDestroyed?.Invoke(this, new WorkerLifecycleEventArgs
+                {
+                    WorkerName = worker.Name,
+                    ActiveWorkerCount = _workers.Count
+                });
                 
                 if (_workers.Count < _options.MaxThreads)
                 {
@@ -229,6 +263,11 @@ public class CustomThreadPool : IDisposable
             if (queueSize > _options.ScaleUpThreshold && idleCount == 0 && _workers.Count < _options.MaxThreads)
             {
                 CreateWorker();
+                PoolScaledUp?.Invoke(this, new PoolScalingEventArgs
+                {
+                    Reason = "Очередь превысила порог при отсутствии свободных потоков",
+                    NewWorkerCount = _workers.Count
+                });
                 return;
             }
 
@@ -239,6 +278,11 @@ public class CustomThreadPool : IDisposable
                 {
                     Log($"Задача ждёт слишком долго ({oldestTask.WaitTime.TotalMilliseconds:F0} мс), создаём поток");
                     CreateWorker();
+                    PoolScaledUp?.Invoke(this, new PoolScalingEventArgs
+                    {
+                        Reason = "Превышено время ожидания задачи в очереди",
+                        NewWorkerCount = _workers.Count
+                    });
                 }
             }
         }
@@ -323,6 +367,27 @@ public class CustomThreadPool : IDisposable
     internal bool IsShutdown => _isDisposed;
     internal int IdleTimeoutMs => _options.IdleTimeoutMs;
 
+    internal void NotifyTaskStarted(WorkItem item, string workerName)
+    {
+        TaskStarted?.Invoke(this, new TaskLifecycleEventArgs
+        {
+            TaskName = item.Name,
+            WorkerName = workerName,
+            Success = true
+        });
+    }
+
+    internal void NotifyTaskCompleted(WorkItem item, string workerName, bool success, Exception? error)
+    {
+        TaskCompleted?.Invoke(this, new TaskLifecycleEventArgs
+        {
+            TaskName = item.Name,
+            WorkerName = workerName,
+            Success = success,
+            Error = error
+        });
+    }
+
     private void Log(string message)
     {
         var msg = $"[{DateTime.Now:HH:mm:ss.fff}] [Pool] {message}";
@@ -336,6 +401,11 @@ public class CustomThreadPool : IDisposable
         _isDisposed = true;
 
         Log("Завершение работы пула...");
+        PoolDisposing?.Invoke(this, new PoolDisposingEventArgs
+        {
+            CompletedTasks = _completedTasks,
+            FailedTasks = _failedTasks
+        });
         _shutdownEvent.Set();
 
         try

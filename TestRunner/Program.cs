@@ -1,10 +1,12 @@
 using System.Reflection;
+using TestFramework.Assertions;
+using TestFramework.Exceptions;
 using TestFramework.Runner;
 using TestFramework.ThreadPool;
 
 Console.OutputEncoding = System.Text.Encoding.UTF8;
 
-PrintHelp();
+PrintBanner();
 
 try
 {
@@ -57,6 +59,12 @@ try
     }
     else
     {
+        if (!args.Contains("--skip-lab4-demo"))
+        {
+            await RunLab4Showcase(output, testAssembly);
+        }
+
+        WriteColored(output, "\n========== Полный прогон тестов ==========\n", ConsoleColor.White);
         var results = await runner.RunTestsAsync(testAssembly);
         
         Console.WriteLine($"\nРезультаты сохранены в: {outputFile}");
@@ -74,21 +82,11 @@ catch (Exception ex)
     return 2;
 }
 
-void PrintHelp()
+void PrintBanner()
 {
-    Console.WriteLine("=== Тестовый фреймворк (Лабораторная работа 3) ===");
-    Console.WriteLine("Собственный пул потоков с динамическим масштабированием\n");
-    Console.WriteLine("Параметры:");
-    Console.WriteLine("  --parallel            Параллельное выполнение (по умолчанию)");
-    Console.WriteLine("  --sequential          Последовательное выполнение");
-    Console.WriteLine("  --custom-pool         Использовать собственный пул потоков");
-    Console.WriteLine("  --min-threads=N       Минимальное количество потоков (по умолчанию: 2)");
-    Console.WriteLine("  --max-threads=N       Максимальное количество потоков (по умолчанию: кол-во ядер * 2)");
-    Console.WriteLine("  --compare             Сравнить производительность режимов");
-    Console.WriteLine("  --load-test           Моделирование нагрузки (50+ тестов)");
-    Console.WriteLine("  --custom-pool-demo    Демонстрация работы собственного пула");
-    Console.WriteLine("  --output=FILE         Файл для сохранения результатов");
-    Console.WriteLine();
+    Console.WriteLine("=== Тестовый фреймворк | ЛР 3–4 ===");
+    Console.WriteLine("ЛР4: yield TestCaseSource, события пула, фильтр (--category / --author), Assert.That(expr)");
+    Console.WriteLine("Флаги: --skip-lab4-demo  --category=X  --author=X  --compare  --load-test  --custom-pool-demo\n");
 }
 
 TestRunnerOptions ParseOptions(string[] args)
@@ -129,6 +127,24 @@ TestRunnerOptions ParseOptions(string[] args)
             options.MaxDegreeOfParallelism = maxThreads;
             options.MaxThreads = maxThreads;
         }
+    }
+
+    var category = GetArgValue(args, "--category");
+    var author = GetArgValue(args, "--author");
+    var filterParts = new List<Func<TestMetadata, bool>>();
+    if (!string.IsNullOrWhiteSpace(category))
+    {
+        var c = category.Trim();
+        filterParts.Add(m => m.Categories.Any(x => string.Equals(x, c, StringComparison.OrdinalIgnoreCase)));
+    }
+    if (!string.IsNullOrWhiteSpace(author))
+    {
+        var a = author.Trim();
+        filterParts.Add(m => string.Equals(m.Author, a, StringComparison.OrdinalIgnoreCase));
+    }
+    if (filterParts.Count > 0)
+    {
+        options.TestFilter = m => filterParts.All(f => f(m));
     }
 
     return options;
@@ -238,6 +254,74 @@ async Task RunLoadTest(TextWriter output)
 
     WriteColored(output, $"\n--- Демонстрация динамического масштабирования завершена ---", ConsoleColor.Cyan);
     WriteColored(output, $"Всего выполнено {taskId} задач (больше 50 требуемых)", ConsoleColor.Green);
+}
+
+async Task RunLab4Showcase(TextWriter output, Assembly testAssembly)
+{
+    WriteColored(output, "\n╔══════════════════════════════════════════════════════════╗", ConsoleColor.Cyan);
+    WriteColored(output, "║ Лабораторная работа 4 — демонстрация возможностей       ║", ConsoleColor.Cyan);
+    WriteColored(output, "╚══════════════════════════════════════════════════════════╝", ConsoleColor.Cyan);
+
+    WriteColored(output, "\n--- 1) События жизненного цикла пула потоков ---", ConsoleColor.Yellow);
+    var poolOpts = new ThreadPoolOptions
+    {
+        MinThreads = 1,
+        MaxThreads = 4,
+        IdleTimeoutMs = 8000,
+        ScaleUpThreshold = 2,
+        TaskWaitTimeoutMs = 400,
+        EnableMonitoring = false
+    };
+    using (var pool = new CustomThreadPool(poolOpts, null))
+    {
+        pool.PoolCreated += (_, e) =>
+            WriteColored(output, $"  [EVT] PoolCreated: Min={e.MinThreads}, Max={e.MaxThreads}", ConsoleColor.Green);
+        pool.WorkerCreated += (_, e) =>
+            WriteColored(output, $"  [EVT] WorkerCreated: {e.WorkerName}, активных={e.ActiveWorkerCount}", ConsoleColor.Green);
+        pool.TaskEnqueued += (_, e) =>
+            WriteColored(output, $"  [EVT] TaskEnqueued: {e.TaskName}, очередь={e.QueueLength}", ConsoleColor.DarkCyan);
+        pool.TaskStarted += (_, e) =>
+            WriteColored(output, $"  [EVT] TaskStarted: {e.TaskName} на {e.WorkerName}", ConsoleColor.DarkGreen);
+        pool.TaskCompleted += (_, e) =>
+            WriteColored(output,
+                $"  [EVT] TaskCompleted: {e.TaskName} успех={e.Success}" +
+                (e.Error != null ? $" ({e.Error.Message})" : ""), ConsoleColor.DarkGreen);
+        pool.PoolScaledUp += (_, e) =>
+            WriteColored(output, $"  [EVT] PoolScaledUp: {e.Reason}, потоков={e.NewWorkerCount}", ConsoleColor.Magenta);
+        pool.PoolDisposing += (_, e) =>
+            WriteColored(output, $"  [EVT] PoolDisposing: выполнено={e.CompletedTasks}, ошибок={e.FailedTasks}", ConsoleColor.Yellow);
+
+        for (var i = 0; i < 5; i++)
+        {
+            var id = i;
+            pool.QueueTask(() => Thread.Sleep(30), $"lab4-task-{id}");
+        }
+        await Task.Delay(400);
+        pool.WaitForCompletion(3000);
+    }
+
+    WriteColored(output, "\n--- 2) Assert.That(Expression): сообщение при провале ---", ConsoleColor.Yellow);
+    try
+    {
+        var x = 14;
+        var y = 2;
+        Assert.That(() => x / y == 10);
+    }
+    catch (AssertFailedException ex)
+    {
+        WriteColored(output, ex.Message, ConsoleColor.Red);
+    }
+
+    WriteColored(output, "\n--- 3) Фильтрация тестов (делегат): только категория ParameterSource ---", ConsoleColor.Yellow);
+    var filterOpts = new TestRunnerOptions
+    {
+        RunInParallel = false,
+        TestFilter = m => m.Categories.Contains("ParameterSource", StringComparer.OrdinalIgnoreCase)
+    };
+    var filterRunner = new TestRunner(output, filterOpts);
+    await filterRunner.RunTestsAsync(testAssembly);
+
+    WriteColored(output, "\n--- Конец блока ЛР4, далее полный прогон ---\n", ConsoleColor.Cyan);
 }
 
 async Task RunCustomPoolDemo(TextWriter output, TestRunnerOptions options, Assembly assembly)

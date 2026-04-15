@@ -2,7 +2,7 @@ using TestFramework.Exceptions;
 
 namespace TestFramework.Assertions;
 
-public static class Assert
+public static partial class Assert
 {
     public static void AreEqual<T>(T expected, T actual, string? message = null)
     {

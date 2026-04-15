@@ -93,7 +93,9 @@ internal class WorkerThread
             _currentTaskName = workItem.Name;
         }
 
+        _pool.NotifyTaskStarted(workItem, Name);
         bool success = false;
+        Exception? caught = null;
         try
         {
             workItem.Task();
@@ -101,10 +103,12 @@ internal class WorkerThread
         }
         catch (Exception ex)
         {
+            caught = ex;
             Console.WriteLine($"[{Name}] Ошибка в задаче '{workItem.Name}': {ex.Message}");
         }
         finally
         {
+            _pool.NotifyTaskCompleted(workItem, Name, success, caught);
             lock (_stateLock)
             {
                 _isBusy = false;

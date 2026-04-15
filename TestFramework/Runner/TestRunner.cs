@@ -1,3 +1,4 @@
+using System.Collections;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Reflection;
@@ -34,6 +35,8 @@ public class TestRunnerOptions
     public int MinThreads { get; set; } = 2;
     public int MaxThreads { get; set; } = Environment.ProcessorCount * 2;
     public int IdleTimeoutMs { get; set; } = 3000;
+
+    public Func<TestMetadata, bool>? TestFilter { get; set; }
 }
 
 public class TestRunner
@@ -145,19 +148,14 @@ public class TestRunner
 
             foreach (var method in testMethods)
             {
-                var testCases = method.GetCustomAttributes<TestCaseAttribute>().ToArray();
-                
-                if (testCases.Length > 0)
+                if (!PassesFilter(testClass, method))
                 {
-                    foreach (var testCase in testCases)
-                    {
-                        allExecutions.Add((testClass, method, testCase.Parameters));
-                    }
+                    WriteSkipped($"  [ФИЛЬТР] Пропуск: {testClass.Name}.{method.Name}");
+                    continue;
                 }
-                else
-                {
-                    allExecutions.Add((testClass, method, null));
-                }
+
+                foreach (var parameters in ExpandParameterSets(testClass, method))
+                    allExecutions.Add((testClass, method, parameters));
             }
         }
 
@@ -362,6 +360,102 @@ public class TestRunner
         return (sequentialTime, parallelTime);
     }
 
+    private bool PassesFilter(Type testClass, MethodInfo method)
+    {
+        if (_options.TestFilter == null)
+            return true;
+        return _options.TestFilter(BuildMetadata(testClass, method));
+    }
+
+    private static TestMetadata BuildMetadata(Type testClass, MethodInfo method)
+    {
+        var classCats = testClass.GetCustomAttributes<CategoryAttribute>().Select(c => c.Name).ToList();
+        var methodCats = method.GetCustomAttributes<CategoryAttribute>().Select(c => c.Name).ToList();
+        var categories = classCats.Concat(methodCats).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+
+        var author = method.GetCustomAttribute<AuthorAttribute>()?.Name
+                     ?? testClass.GetCustomAttribute<AuthorAttribute>()?.Name;
+
+        return new TestMetadata
+        {
+            TestClass = testClass,
+            ClassName = testClass.Name,
+            Method = method,
+            MethodName = method.Name,
+            Categories = categories,
+            Author = author,
+            ClassPriority = testClass.GetCustomAttribute<TestClassAttribute>()?.Priority ?? 0,
+            MethodPriority = method.GetCustomAttribute<TestMethodAttribute>()?.Priority ?? 0
+        };
+    }
+
+    private IEnumerable<object?[]?> ExpandParameterSets(Type testClass, MethodInfo method)
+    {
+        var sourceAttr = method.GetCustomAttribute<TestCaseSourceAttribute>();
+        var testCases = method.GetCustomAttributes<TestCaseAttribute>().ToArray();
+
+        if (sourceAttr != null)
+        {
+            foreach (var row in EnumerateTestCaseSource(testClass, sourceAttr))
+                yield return row;
+            yield break;
+        }
+
+        if (testCases.Length > 0)
+        {
+            foreach (var testCase in testCases)
+                yield return testCase.Parameters;
+            yield break;
+        }
+
+        yield return null;
+    }
+
+    private static IEnumerable<object?[]?> EnumerateTestCaseSource(Type testClass, TestCaseSourceAttribute attr)
+    {
+        var declaring = attr.SourceType ?? testClass;
+        const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance;
+
+        var method = declaring.GetMethod(attr.MemberName, flags);
+        PropertyInfo? prop = null;
+        if (method == null)
+        {
+            prop = declaring.GetProperty(attr.MemberName, flags);
+            method = prop?.GetGetMethod(true);
+        }
+
+        if (method == null)
+            throw new InvalidOperationException($"TestCaseSource: не найден член '{attr.MemberName}' в {declaring.Name}");
+
+        object? sourceInstance = null;
+        if (!method.IsStatic)
+            sourceInstance = Activator.CreateInstance(declaring);
+
+        object? result = prop != null
+            ? prop.GetValue(sourceInstance)
+            : method.Invoke(sourceInstance, null);
+
+        if (result is not IEnumerable nonGenericEnumerable)
+            yield break;
+
+        foreach (var item in nonGenericEnumerable)
+        {
+            if (item == null)
+            {
+                yield return null;
+                continue;
+            }
+
+            if (item is object?[] arr)
+            {
+                yield return arr;
+                continue;
+            }
+
+            yield return new[] { item };
+        }
+    }
+
     private IEnumerable<Type> DiscoverTestClasses(Assembly assembly)
     {
         return assembly.GetTypes()
@@ -389,19 +483,14 @@ public class TestRunner
 
         foreach (var method in testMethods)
         {
-            var testCases = method.GetCustomAttributes<TestCaseAttribute>().ToArray();
-            
-            if (testCases.Length > 0)
+            if (!PassesFilter(testClass, method))
             {
-                foreach (var testCase in testCases)
-                {
-                    testExecutions.Add((method, testCase.Parameters));
-                }
+                WriteSkipped($"  [ФИЛЬТР] Пропуск: {method.Name}");
+                continue;
             }
-            else
-            {
-                testExecutions.Add((method, null));
-            }
+
+            foreach (var parameters in ExpandParameterSets(testClass, method))
+                testExecutions.Add((method, parameters));
         }
 
         if (_options.RunInParallel && _options.ParallelizeTestMethods)
