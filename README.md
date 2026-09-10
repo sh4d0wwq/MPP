@@ -1,2 +1,2 @@
-### Лабораторная работа №3 по предмету СПП
-Лащенко Егор Николаевич, группа 351002
+# laboratory project for sicipline "Modern Programming Platforms"
+# made by Yahor Lashchenka
