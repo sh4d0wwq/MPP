@@ -1,2 +1,2 @@
-# laboratory project for sicipline "Modern Programming Platforms"
+# Laboratory project for discipline "Modern Programming Platforms"
 # made by Yahor Lashchenka
